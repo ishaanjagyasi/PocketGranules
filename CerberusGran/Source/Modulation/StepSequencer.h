@@ -42,6 +42,7 @@ public:
     int getLength()      const { return length; }
     int getCurrentStep() const { return currentStep; }
     float getOutput()    const { return output.load (std::memory_order_relaxed); }
+    bool  isBipolar()    const noexcept { return bipolar; }
 
     void clearSteps()
     {
@@ -78,7 +79,8 @@ public:
             }
         }
 
-        if (! bipolar) val = val * 0.5f + 0.5f;
+        // Apply own bipolar/unipolar transform
+        if (! bipolar) val = val * 0.5f + 0.5f; // [-1, 1] -> [0, 1]
         output.store (val);
     }
 

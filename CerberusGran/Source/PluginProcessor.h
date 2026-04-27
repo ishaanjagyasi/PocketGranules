@@ -35,6 +35,9 @@ public:
     void getStateInformation (juce::MemoryBlock& destData) override;
     void setStateInformation (const void* data, int sizeInBytes) override;
 
+    // Reset all APVTS params to defaults + clear modulation state (used by Init Preset)
+    void resetToDefaults();
+
     void loadSampleFile (const juce::File& file);
 
     RingBuffer& getRingBuffer() { return ringBuffer; }
@@ -78,17 +81,32 @@ private:
     std::atomic<float>* mixParam = nullptr;
     std::atomic<float>* sourceModeParam = nullptr;
 
-    // Modulation source param pointers
-    std::atomic<float>* lfoRateParam = nullptr;
-    std::atomic<float>* lfoShapeParam = nullptr;
-    std::atomic<float>* lfoDepthParam = nullptr;
-    std::atomic<float>* lfoBipolarParam = nullptr;
-    std::atomic<float>* lfoPhaseParam = nullptr;
+    // Modulation source param pointers — 5 LFOs each with 8 params
+    struct LfoParamPtrs
+    {
+        std::atomic<float>* rate = nullptr;
+        std::atomic<float>* rateMode = nullptr;
+        std::atomic<float>* rateSyncDiv = nullptr;
+        std::atomic<float>* rateSyncType = nullptr;
+        std::atomic<float>* shape = nullptr;
+        std::atomic<float>* depth = nullptr;
+        std::atomic<float>* bipolar = nullptr;
+        std::atomic<float>* phase = nullptr;
+    };
+    std::array<LfoParamPtrs, 5> lfoParams;
+
     std::atomic<float>* seqRateParam = nullptr;
+    std::atomic<float>* seqRateModeParam = nullptr;
+    std::atomic<float>* seqRateSyncDivParam = nullptr;
+    std::atomic<float>* seqRateSyncTypeParam = nullptr;
     std::atomic<float>* seqLengthParam = nullptr;
     std::atomic<float>* seqPlayModeParam = nullptr;
     std::atomic<float>* seqBipolarParam = nullptr;
     std::atomic<float>* seqSmoothParam = nullptr;
+
+    std::atomic<float>* envSensParam = nullptr;
+    std::atomic<float>* envRiseParam = nullptr;
+    std::atomic<float>* envFallParam = nullptr;
 
     struct HeadParamPtrs
     {
@@ -127,9 +145,13 @@ private:
         std::atomic<float>* reverbDamp = nullptr;
         std::atomic<float>* reverbMix = nullptr;
 
-        // Cached param IDs for modulation lookup (modulatable grain params)
+        // Cached param IDs for modulation lookup (grain + FX params)
         juce::String idPosition, idSpread, idRate, idLength;
         juce::String idPitch, idShape, idReverse, idGain;
+        juce::String idFilterCutoff, idFilterRes;
+        juce::String idCrushBits, idCrushRate;
+        juce::String idDelayTime, idDelayFeedback, idDelayMix;
+        juce::String idReverbSize, idReverbDamp, idReverbMix;
     };
 
     std::array<HeadParamPtrs, kNumHeads> headParams;

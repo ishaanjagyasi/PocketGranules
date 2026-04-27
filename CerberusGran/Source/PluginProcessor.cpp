@@ -15,12 +15,27 @@ CerberusGranAudioProcessor::CerberusGranAudioProcessor()
     mixParam        = apvts.getRawParameterValue ("mix");
     sourceModeParam = apvts.getRawParameterValue ("sourceMode");
 
-    lfoRateParam     = apvts.getRawParameterValue ("lfo_rate");
-    lfoShapeParam    = apvts.getRawParameterValue ("lfo_shape");
-    lfoDepthParam    = apvts.getRawParameterValue ("lfo_depth");
-    lfoBipolarParam  = apvts.getRawParameterValue ("lfo_bipolar");
-    lfoPhaseParam    = apvts.getRawParameterValue ("lfo_phase");
-    seqRateParam     = apvts.getRawParameterValue ("seq_rate");
+    for (int i = 0; i < 5; ++i)
+    {
+        auto suf = juce::String (i);
+        auto& lp = lfoParams[i];
+        lp.rate         = apvts.getRawParameterValue ("lfo" + suf + "_rate");
+        lp.rateMode     = apvts.getRawParameterValue ("lfo" + suf + "_rateMode");
+        lp.rateSyncDiv  = apvts.getRawParameterValue ("lfo" + suf + "_rateSyncDiv");
+        lp.rateSyncType = apvts.getRawParameterValue ("lfo" + suf + "_rateSyncType");
+        lp.shape        = apvts.getRawParameterValue ("lfo" + suf + "_shape");
+        lp.depth        = apvts.getRawParameterValue ("lfo" + suf + "_depth");
+        lp.bipolar      = apvts.getRawParameterValue ("lfo" + suf + "_bipolar");
+        lp.phase        = apvts.getRawParameterValue ("lfo" + suf + "_phase");
+    }
+    seqRateParam         = apvts.getRawParameterValue ("seq_rate");
+    seqRateModeParam     = apvts.getRawParameterValue ("seq_rateMode");
+    seqRateSyncDivParam  = apvts.getRawParameterValue ("seq_rateSyncDiv");
+    seqRateSyncTypeParam = apvts.getRawParameterValue ("seq_rateSyncType");
+
+    envSensParam = apvts.getRawParameterValue ("env_sens");
+    envRiseParam = apvts.getRawParameterValue ("env_rise");
+    envFallParam = apvts.getRawParameterValue ("env_fall");
     seqLengthParam   = apvts.getRawParameterValue ("seq_length");
     seqPlayModeParam = apvts.getRawParameterValue ("seq_playmode");
     seqBipolarParam  = apvts.getRawParameterValue ("seq_bipolar");
@@ -67,14 +82,24 @@ CerberusGranAudioProcessor::CerberusGranAudioProcessor()
         hp.reverbMix     = apvts.getRawParameterValue (id ("reverbMix"));
 
         // Cache modulation-target param IDs once to avoid per-block string allocs
-        hp.idPosition = id ("position");
-        hp.idSpread   = id ("spread");
-        hp.idRate     = id ("rate");
-        hp.idLength   = id ("length");
-        hp.idPitch    = id ("pitch");
-        hp.idShape    = id ("shape");
-        hp.idReverse  = id ("reverse");
-        hp.idGain     = id ("gain");
+        hp.idPosition      = id ("position");
+        hp.idSpread        = id ("spread");
+        hp.idRate          = id ("rate");
+        hp.idLength        = id ("length");
+        hp.idPitch         = id ("pitch");
+        hp.idShape         = id ("shape");
+        hp.idReverse       = id ("reverse");
+        hp.idGain          = id ("gain");
+        hp.idFilterCutoff  = id ("filterCutoff");
+        hp.idFilterRes     = id ("filterRes");
+        hp.idCrushBits     = id ("crushBits");
+        hp.idCrushRate     = id ("crushRate");
+        hp.idDelayTime     = id ("delayTime");
+        hp.idDelayFeedback = id ("delayFeedback");
+        hp.idDelayMix      = id ("delayMix");
+        hp.idReverbSize    = id ("reverbSize");
+        hp.idReverbDamp    = id ("reverbDamp");
+        hp.idReverbMix     = id ("reverbMix");
     }
 }
 
@@ -104,18 +129,74 @@ void CerberusGranAudioProcessor::prepareToPlay (double sampleRate, int samplesPe
 
 void CerberusGranAudioProcessor::updateParametersFromAPVTS()
 {
-    // Push modulation source parameters to engine
-    modEngine.lfo.setRateHz   (lfoRateParam->load());
-    modEngine.lfo.setShape    (static_cast<int> (lfoShapeParam->load()));
-    modEngine.lfo.setDepth    (lfoDepthParam->load());
-    modEngine.lfo.setBipolar  (lfoBipolarParam->load() >= 0.5f);
-    modEngine.lfo.setPhaseOff (lfoPhaseParam->load());
+    // Pull host BPM once for any sync-mode conversions below
+    double hostBpm = 120.0;
+    if (auto* ph = getPlayHead())
+        if (auto pos = ph->getPosition())
+            if (auto b = pos->getBpm()) hostBpm = *b;
 
-    modEngine.stepSeq.setRateHz   (seqRateParam->load());
+    // Push modulation source parameters to engine — 5 LFOs
+    for (int i = 0; i < 5; ++i)
+    {
+        auto& lp = lfoParams[i];
+        auto& l  = modEngine.lfos[i];
+
+        int rateMode = static_cast<int> (lp.rateMode->load());
+        float rateHz;
+        if (rateMode == 0) // Time
+        {
+            rateHz = lp.rate->load();
+        }
+        else // Sync
+        {
+            // Divisions: 0=8/1 (8 bars), 1=4/1, 2=2/1, 3=1/1, 4=1/2, ... 9=1/64
+            int divIdx     = static_cast<int> (lp.rateSyncDiv->load());
+            double divVal  = 8.0 * std::pow (0.5, divIdx); // 8.0 → 4 → 2 → 1 → 0.5 → ...
+            double quartMs = 60000.0 / hostBpm;
+            double noteMs  = divVal * 4.0 * quartMs;
+
+            int syncType = static_cast<int> (lp.rateSyncType->load());
+            if (syncType == 1)      noteMs *= 2.0 / 3.0; // triplet
+            else if (syncType == 2) noteMs *= 3.0 / 2.0; // dotted
+
+            rateHz = static_cast<float> (1000.0 / juce::jmax (1.0, noteMs));
+        }
+
+        l.setRateHz   (rateHz);
+        l.setShape    (static_cast<int> (lp.shape->load()));
+        l.setDepth    (lp.depth->load());
+        l.setBipolar  (lp.bipolar->load() >= 0.5f);
+        l.setPhaseOff (lp.phase->load());
+    }
+
+    {
+        int srMode = static_cast<int> (seqRateModeParam->load());
+        float seqRateHz;
+        if (srMode == 0)
+        {
+            seqRateHz = seqRateParam->load();
+        }
+        else
+        {
+            int divIdx     = static_cast<int> (seqRateSyncDivParam->load());
+            double divVal  = 1.0 / static_cast<double> (1 << divIdx);
+            double quartMs = 60000.0 / hostBpm;
+            double noteMs  = divVal * 4.0 * quartMs;
+            int syncType   = static_cast<int> (seqRateSyncTypeParam->load());
+            if (syncType == 1)      noteMs *= 2.0 / 3.0;
+            else if (syncType == 2) noteMs *= 3.0 / 2.0;
+            seqRateHz = static_cast<float> (1000.0 / juce::jmax (1.0, noteMs));
+        }
+        modEngine.stepSeq.setRateHz (seqRateHz);
+    }
     modEngine.stepSeq.setLength   (static_cast<int> (seqLengthParam->load()));
     modEngine.stepSeq.setPlayMode (static_cast<int> (seqPlayModeParam->load()));
     modEngine.stepSeq.setBipolar  (seqBipolarParam->load() >= 0.5f);
     modEngine.stepSeq.setSmooth   (seqSmoothParam->load());
+
+    modEngine.envFollower.setSensitivity (envSensParam->load());
+    modEngine.envFollower.setRiseMs      (envRiseParam->load());
+    modEngine.envFollower.setFallMs      (envFallParam->load());
 
     float gainDb = masterGainParam->load();
     grainEngine.setMasterGain (gainDb <= -59.9f ? 0.0f : juce::Decibels::decibelsToGain (gainDb));
@@ -212,23 +293,23 @@ void CerberusGranAudioProcessor::updateParametersFromAPVTS()
         head.setReversePct     (modEngine.applyMod (hp.idReverse, hp.reverse->load(), 0.0f,   100.0f));
         head.setGainDb         (modEngine.applyMod (hp.idGain,    hp.gain->load(),    -24.0f, 6.0f));
 
-        // FX chain
+        // FX chain (modulatable params wrapped with applyMod)
         head.setFilterEnabled (hp.filterOn->load() >= 0.5f);
         head.setFilterType (static_cast<int> (hp.filterType->load()));
-        head.setFilterCutoff (hp.filterCutoff->load());
-        head.setFilterResonance (hp.filterRes->load());
+        head.setFilterCutoff    (modEngine.applyMod (hp.idFilterCutoff,  hp.filterCutoff->load(), 20.0f, 20000.0f));
+        head.setFilterResonance (modEngine.applyMod (hp.idFilterRes,     hp.filterRes->load(),    0.1f,  10.0f));
 
         head.setCrushEnabled (hp.crushOn->load() >= 0.5f);
-        head.setCrushBits (hp.crushBits->load());
-        head.setCrushRate (hp.crushRate->load());
+        head.setCrushBits (modEngine.applyMod (hp.idCrushBits, hp.crushBits->load(), 1.0f, 16.0f));
+        head.setCrushRate (modEngine.applyMod (hp.idCrushRate, hp.crushRate->load(), 1.0f, 50.0f));
 
         head.setDelayEnabled (hp.delayOn->load() >= 0.5f);
-        // Delay time: Time mode uses raw ms, Sync mode calculates from tempo
+        // Delay time: Time mode uses raw ms (modulatable), Sync mode calculates from tempo
         {
             int dtMode = static_cast<int> (hp.delayTimeMode->load());
             if (dtMode == 0)
             {
-                head.setDelayTime (hp.delayTime->load());
+                head.setDelayTime (modEngine.applyMod (hp.idDelayTime, hp.delayTime->load(), 1.0f, 2000.0f));
             }
             else
             {
@@ -250,13 +331,13 @@ void CerberusGranAudioProcessor::updateParametersFromAPVTS()
                 head.setDelayTime (static_cast<float> (juce::jlimit (1.0, 2000.0, noteMs)));
             }
         }
-        head.setDelayFeedback (hp.delayFeedback->load());
-        head.setDelayMix (hp.delayMix->load());
+        head.setDelayFeedback (modEngine.applyMod (hp.idDelayFeedback, hp.delayFeedback->load(), 0.0f, 0.95f));
+        head.setDelayMix      (modEngine.applyMod (hp.idDelayMix,      hp.delayMix->load(),      0.0f, 1.0f));
 
         head.setReverbEnabled (hp.reverbOn->load() >= 0.5f);
-        head.setReverbSize (hp.reverbSize->load());
-        head.setReverbDamp (hp.reverbDamp->load());
-        head.setReverbMix (hp.reverbMix->load());
+        head.setReverbSize (modEngine.applyMod (hp.idReverbSize, hp.reverbSize->load(), 0.0f, 1.0f));
+        head.setReverbDamp (modEngine.applyMod (hp.idReverbDamp, hp.reverbDamp->load(), 0.0f, 1.0f));
+        head.setReverbMix  (modEngine.applyMod (hp.idReverbMix,  hp.reverbMix->load(),  0.0f, 1.0f));
     }
 
     anySyncActive.store (anySync, std::memory_order_relaxed);
@@ -271,6 +352,13 @@ void CerberusGranAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     // Write to ring buffer unless frozen
     if (!freeze.load (std::memory_order_relaxed))
         ringBuffer.write (buffer, buffer.getNumSamples());
+
+    // Feed envelope follower with the input audio (pre grain processing)
+    {
+        const float* l = buffer.getNumChannels() > 0 ? buffer.getReadPointer (0) : nullptr;
+        const float* r = buffer.getNumChannels() > 1 ? buffer.getReadPointer (1) : l;
+        modEngine.envFollower.process (l, r, buffer.getNumSamples());
+    }
 
     // Advance modulation sources once per block, then feed mod into param updates
     modEngine.tick (buffer.getNumSamples());
@@ -347,6 +435,8 @@ void CerberusGranAudioProcessor::getStateInformation (juce::MemoryBlock& destDat
             cx->setAttribute ("src",  c.sourceIndex);
             cx->setAttribute ("dest", c.destParamId);
             cx->setAttribute ("amt",  (double) c.amount);
+            cx->setAttribute ("byp",  c.bypassed ? 1 : 0);
+            cx->setAttribute ("bip",  c.bipolar ? 1 : 0);
         }
     }
 
@@ -388,10 +478,25 @@ void CerberusGranAudioProcessor::setStateInformation (const void* data, int size
             int src = c->getIntAttribute ("src", -1);
             juce::String dest = c->getStringAttribute ("dest");
             float amt = (float) c->getDoubleAttribute ("amt", 0.0);
+            bool byp = c->getIntAttribute ("byp", 0) != 0;
+            bool bip = c->getIntAttribute ("bip", 0) != 0;
             if (src >= 0 && dest.isNotEmpty())
-                modEngine.addOrUpdateConnection (src, dest, amt);
+            {
+                modEngine.addOrUpdateConnection (src, dest, amt, bip);
+                if (byp) modEngine.setConnectionBypassed (src, dest, true);
+            }
         }
     }
+}
+
+void CerberusGranAudioProcessor::resetToDefaults()
+{
+    for (auto* p : getParameters())
+        p->setValueNotifyingHost (p->getDefaultValue());
+
+    modEngine.clearConnections();
+    for (int i = 0; i < StepSequencer::kMaxSteps; ++i)
+        modEngine.stepSeq.setStepValue (i, 0.0f);
 }
 
 juce::AudioProcessorEditor* CerberusGranAudioProcessor::createEditor()

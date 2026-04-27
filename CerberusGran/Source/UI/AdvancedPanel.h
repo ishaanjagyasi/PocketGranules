@@ -3,6 +3,7 @@
 #include "../PluginProcessor.h"
 #include "LFOPanel.h"
 #include "StepSequencerPanel.h"
+#include "EnvelopeFollowerPanel.h"
 
 class AdvancedPanel : public juce::Component, private juce::Timer
 {
@@ -10,7 +11,8 @@ public:
     AdvancedPanel (CerberusGranAudioProcessor& p)
         : processor (p),
           lfoPanel (p),
-          seqPanel (p)
+          seqPanel (p),
+          envPanel (p)
     {
         // Tab buttons — radio group so only one active
         lfoTabBtn.setButtonText ("LFO");
@@ -34,6 +36,16 @@ public:
         seqTabBtn.onClick = [this] { showTab (1); };
         addAndMakeVisible (seqTabBtn);
 
+        envTabBtn.setButtonText ("Env Follower");
+        envTabBtn.setClickingTogglesState (true);
+        envTabBtn.setRadioGroupId (101);
+        envTabBtn.setColour (juce::TextButton::buttonColourId,   juce::Colour (0xffd8d8dc));
+        envTabBtn.setColour (juce::TextButton::buttonOnColourId, juce::Colour (0xfff6f6f8));
+        envTabBtn.setColour (juce::TextButton::textColourOffId,  juce::Colour (0xff555560));
+        envTabBtn.setColour (juce::TextButton::textColourOnId,   juce::Colour (0xff1a1a1e));
+        envTabBtn.onClick = [this] { showTab (2); };
+        addAndMakeVisible (envTabBtn);
+
         // Assign button — toggles "assigning" state in the editor above
         assignBtn.setButtonText ("Assign");
         assignBtn.setClickingTogglesState (true);
@@ -43,12 +55,13 @@ public:
         assignBtn.setColour (juce::TextButton::textColourOnId,   juce::Colour (0xffeeeeee));
         assignBtn.onClick = [this] {
             if (onAssignToggled)
-                onAssignToggled (currentTab, assignBtn.getToggleState());
+                onAssignToggled (resolveSourceIndex(), assignBtn.getToggleState());
         };
         addAndMakeVisible (assignBtn);
 
         addChildComponent (lfoPanel);
         addChildComponent (seqPanel);
+        addChildComponent (envPanel);
         lfoPanel.setVisible (true);
 
         startTimerHz (30);
@@ -92,19 +105,31 @@ public:
         lfoTabBtn.setBounds (tabRow.removeFromLeft (80));
         tabRow.removeFromLeft (4);
         seqTabBtn.setBounds (tabRow.removeFromLeft (80));
+        tabRow.removeFromLeft (4);
+        envTabBtn.setBounds (tabRow.removeFromLeft (100));
         assignBtn.setBounds (tabRow.removeFromRight (80));
 
         area.removeFromTop (6);
 
-        // Body: selected panel fills remaining
+        // Body: each panel fills the remaining area; only the active one is visible
         lfoPanel.setBounds (area);
         seqPanel.setBounds (area);
+        envPanel.setBounds (area);
     }
 
     void timerCallback() override
     {
-        if (currentTab == 0) lfoPanel.repaint();
-        else                 seqPanel.repaint();
+        if      (currentTab == 0) lfoPanel.repaint();
+        else if (currentTab == 1) seqPanel.repaint();
+        else                       envPanel.repaint();
+    }
+
+    // Map current tab + selected LFO index to the engine's flat source index
+    int resolveSourceIndex() const
+    {
+        if (currentTab == 0) return lfoPanel.getCurrentLfoIndex(); // 0..4
+        if (currentTab == 1) return ModulationEngine::kStepSeq;    // 5
+        return ModulationEngine::kEnvFollower;                     // 6
     }
 
 private:
@@ -113,17 +138,15 @@ private:
         currentTab = idx;
         lfoPanel.setVisible (idx == 0);
         seqPanel.setVisible (idx == 1);
-        // Exit assign mode on tab change so user explicitly opts in on the new source
-        if (assignBtn.getToggleState())
-        {
-            assignBtn.setToggleState (false, juce::dontSendNotification);
-            if (onAssignToggled) onAssignToggled (idx, false);
-        }
+        envPanel.setVisible (idx == 2);
+        // Keep assign mode on across tab changes — the editor's timer will push
+        // the new source index to the EngineColumns so subsequent drags target it.
     }
 
     CerberusGranAudioProcessor& processor;
-    juce::TextButton lfoTabBtn, seqTabBtn, assignBtn;
+    juce::TextButton lfoTabBtn, seqTabBtn, envTabBtn, assignBtn;
     LFOPanel lfoPanel;
     StepSequencerPanel seqPanel;
+    EnvelopeFollowerPanel envPanel;
     int currentTab = 0;
 };

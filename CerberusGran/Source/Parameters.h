@@ -20,30 +20,63 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout
         "sourceMode", "Source",
         juce::StringArray { "Live", "File" }, 0));
 
-    // === Modulation — LFO ===
-    params.push_back (std::make_unique<juce::AudioParameterFloat> (
-        "lfo_rate", "LFO Rate",
-        juce::NormalisableRange<float> (0.01f, 20.0f, 0.01f, 0.4f), 1.0f));
+    // === Modulation — 5 LFOs, each with rate (free or tempo-synced), shape, depth, etc.
+    for (int i = 0; i < 5; ++i)
+    {
+        auto suf = juce::String (i);
+        auto nm  = "LFO " + juce::String (i + 1) + " ";
 
-    params.push_back (std::make_unique<juce::AudioParameterChoice> (
-        "lfo_shape", "LFO Shape",
-        juce::StringArray { "Sine", "Triangle", "Saw Up", "Saw Down", "Square", "S&H" }, 0));
+        // Default rates spread across the LFOs for variety
+        static const float defaultRates[] = { 1.0f, 2.0f, 0.5f, 4.0f, 0.25f };
 
-    params.push_back (std::make_unique<juce::AudioParameterFloat> (
-        "lfo_depth", "LFO Depth",
-        juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 1.0f));
+        params.push_back (std::make_unique<juce::AudioParameterFloat> (
+            "lfo" + suf + "_rate", nm + "Rate",
+            juce::NormalisableRange<float> (0.01f, 20.0f, 0.01f, 0.4f), defaultRates[i]));
 
-    params.push_back (std::make_unique<juce::AudioParameterBool> (
-        "lfo_bipolar", "LFO Bipolar", true));
+        params.push_back (std::make_unique<juce::AudioParameterChoice> (
+            "lfo" + suf + "_rateMode", nm + "Rate Mode",
+            juce::StringArray { "Time", "Sync" }, 0));
 
-    params.push_back (std::make_unique<juce::AudioParameterFloat> (
-        "lfo_phase", "LFO Phase",
-        juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 0.0f));
+        params.push_back (std::make_unique<juce::AudioParameterChoice> (
+            "lfo" + suf + "_rateSyncDiv", nm + "Sync Div",
+            juce::StringArray { "8/1", "4/1", "2/1", "1/1", "1/2", "1/4", "1/8", "1/16", "1/32", "1/64" }, 6));
+
+        params.push_back (std::make_unique<juce::AudioParameterChoice> (
+            "lfo" + suf + "_rateSyncType", nm + "Sync Type",
+            juce::StringArray { "Normal", "Triplet", "Dotted" }, 0));
+
+        params.push_back (std::make_unique<juce::AudioParameterChoice> (
+            "lfo" + suf + "_shape", nm + "Shape",
+            juce::StringArray { "Sine", "Triangle", "Saw Up", "Saw Down", "Square", "S&H" }, 0));
+
+        params.push_back (std::make_unique<juce::AudioParameterFloat> (
+            "lfo" + suf + "_depth", nm + "Depth",
+            juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 1.0f));
+
+        params.push_back (std::make_unique<juce::AudioParameterBool> (
+            "lfo" + suf + "_bipolar", nm + "Bipolar", true));
+
+        params.push_back (std::make_unique<juce::AudioParameterFloat> (
+            "lfo" + suf + "_phase", nm + "Phase",
+            juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 0.0f));
+    }
 
     // === Modulation — Step Sequencer ===
     params.push_back (std::make_unique<juce::AudioParameterFloat> (
         "seq_rate", "Seq Rate",
         juce::NormalisableRange<float> (0.01f, 20.0f, 0.01f, 0.4f), 2.0f));
+
+    params.push_back (std::make_unique<juce::AudioParameterChoice> (
+        "seq_rateMode", "Seq Rate Mode",
+        juce::StringArray { "Time", "Sync" }, 0));
+
+    params.push_back (std::make_unique<juce::AudioParameterChoice> (
+        "seq_rateSyncDiv", "Seq Sync Div",
+        juce::StringArray { "1/1", "1/2", "1/4", "1/8", "1/16", "1/32", "1/64", "1/128", "1/256" }, 3));
+
+    params.push_back (std::make_unique<juce::AudioParameterChoice> (
+        "seq_rateSyncType", "Seq Sync Type",
+        juce::StringArray { "Normal", "Triplet", "Dotted" }, 0));
 
     params.push_back (std::make_unique<juce::AudioParameterInt> (
         "seq_length", "Seq Length", 1, 16, 16));
@@ -58,6 +91,19 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout
     params.push_back (std::make_unique<juce::AudioParameterFloat> (
         "seq_smooth", "Seq Smooth",
         juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f), 0.0f));
+
+    // === Modulation — Envelope Follower ===
+    params.push_back (std::make_unique<juce::AudioParameterFloat> (
+        "env_sens", "Env Sensitivity",
+        juce::NormalisableRange<float> (0.0f, 4.0f, 0.01f), 1.0f));
+
+    params.push_back (std::make_unique<juce::AudioParameterFloat> (
+        "env_rise", "Env Rise",
+        juce::NormalisableRange<float> (0.1f, 1000.0f, 0.1f, 0.4f), 10.0f));
+
+    params.push_back (std::make_unique<juce::AudioParameterFloat> (
+        "env_fall", "Env Fall",
+        juce::NormalisableRange<float> (1.0f, 2000.0f, 1.0f, 0.4f), 100.0f));
 
     // Per-head: core granular params only
     for (int h = 0; h < kNumHeads; ++h)

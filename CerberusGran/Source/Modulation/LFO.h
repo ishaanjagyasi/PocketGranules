@@ -35,22 +35,39 @@ public:
         if (shape == SampleHold && phase < prevPhase)
             shRandom = juce::Random::getSystemRandom().nextFloat() * 2.0f - 1.0f;
 
+        // Always output raw bipolar shape * depth — per-connection bipolar/unipolar
+        // interpretation happens downstream in ModulationEngine::applyMod.
         float v = shapeValue (phase + phaseOffset);
-        if (! bipolar) v = v * 0.5f + 0.5f;
         output.store (v * depth);
     }
 
-    float getOutput() const { return output.load (std::memory_order_relaxed); }
-    float getPhase()  const { return phase; }
+    float getOutput()  const { return output.load (std::memory_order_relaxed); }
+    float getPhase()   const { return phase; }
+    bool  isBipolar()  const noexcept { return bipolar; }
 
-    // For UI preview at arbitrary phase
+    // For UI preview at arbitrary phase — returns raw bipolar shape * depth
     float shapeValueAtPhase (float p) const
     {
         p = p + phaseOffset;
         p -= std::floor (p);
-        float v = shapeValue (p);
-        if (! bipolar) v = v * 0.5f + 0.5f;
-        return v * depth;
+        return shapeValue (p) * depth;
+    }
+
+    // Pure shape function — no instance state, safe to call from UI thread
+    // with parameters read directly from APVTS to avoid races with audio-thread updates.
+    static float computeShape (int shapeIdx, float phase)
+    {
+        phase -= std::floor (phase);
+        switch (shapeIdx)
+        {
+            case Sine:       return std::sin (phase * 2.0f * juce::MathConstants<float>::pi);
+            case Triangle:   return 1.0f - 4.0f * std::abs (phase - 0.5f);
+            case SawUp:      return 2.0f * phase - 1.0f;
+            case SawDown:    return 1.0f - 2.0f * phase;
+            case Square:     return phase < 0.5f ? 1.0f : -1.0f;
+            case SampleHold: return 0.0f; // S&H is not phase-deterministic; leave preview flat
+            default:         return 0.0f;
+        }
     }
 
 private:

@@ -5,45 +5,58 @@
 #include <algorithm>
 #include "LFO.h"
 #include "StepSequencer.h"
+#include "EnvelopeFollower.h"
 
 class ModulationEngine
 {
 public:
-    // Source indices
-    static constexpr int kLFO = 0;
-    static constexpr int kStepSeq = 1;
-    static constexpr int kNumSources = 2;
+    // Source indices: 0..kNumLFOs-1 are LFOs, then Step Sequencer, then Envelope Follower.
+    static constexpr int kNumLFOs = 5;
+    static constexpr int kLFO0 = 0;
+    static constexpr int kStepSeq     = kNumLFOs;     // = 5
+    static constexpr int kEnvFollower = kStepSeq + 1; // = 6
+    static constexpr int kNumSources  = kEnvFollower + 1;
+    static bool isLFOSource (int idx) { return idx >= 0 && idx < kNumLFOs; }
 
     struct Connection
     {
         int sourceIndex;
         juce::String destParamId;
-        float amount; // -1..1
+        float amount;       // -1..1
+        bool bypassed = false;
+        bool bipolar  = false; // false = unipolar (default for new), true = bipolar
     };
 
     ModulationEngine() = default;
 
     void prepare (double sr)
     {
-        lfo.prepare (sr);
+        for (auto& l : lfos) l.prepare (sr);
         stepSeq.prepare (sr);
+        envFollower.prepare (sr);
     }
 
-    // Called once per audio block. Advances all sources.
+    // Called once per audio block. Advances LFO/StepSeq sources.
+    // The envelope follower is fed by the processor directly (it needs audio input).
     void tick (int numSamples)
     {
-        lfo.advance (numSamples);
+        for (auto& l : lfos) l.advance (numSamples);
         stepSeq.advance (numSamples);
     }
 
     float getSourceOutput (int sourceIndex) const
     {
-        switch (sourceIndex)
-        {
-            case kLFO:     return lfo.getOutput();
-            case kStepSeq: return stepSeq.getOutput();
-            default:       return 0.0f;
-        }
+        if (isLFOSource (sourceIndex)) return lfos[sourceIndex].getOutput();
+        if (sourceIndex == kStepSeq)   return stepSeq.getOutput();
+        if (sourceIndex == kEnvFollower) return envFollower.getOutput();
+        return 0.0f;
+    }
+
+    bool isSourceBipolar (int sourceIndex) const noexcept
+    {
+        if (isLFOSource (sourceIndex)) return lfos[sourceIndex].isBipolar();
+        if (sourceIndex == kStepSeq)   return stepSeq.isBipolar();
+        return true;
     }
 
     // Apply modulation on top of a base parameter value.
@@ -58,8 +71,23 @@ public:
         float modSum = 0.0f;
         for (const auto& c : connections)
         {
-            if (c.destParamId == paramId)
-                modSum += getSourceOutput (c.sourceIndex) * c.amount;
+            if (c.bypassed) continue;
+            if (c.destParamId != paramId) continue;
+
+            float raw = getSourceOutput (c.sourceIndex);
+            float v;
+            if (c.sourceIndex == kStepSeq || c.sourceIndex == kEnvFollower)
+            {
+                // Step Seq applies its own polarity transform; Env Follower is always
+                // unipolar [0, 1]. Pass through directly.
+                v = raw;
+            }
+            else
+            {
+                // LFO outputs raw bipolar [-1, 1]; per-connection bipolar/unipolar transform
+                v = c.bipolar ? raw : (raw * 0.5f + 0.5f);
+            }
+            modSum += v * c.amount;
         }
 
         if (modSum == 0.0f)
@@ -71,7 +99,9 @@ public:
 
     // -------- UI/message thread operations --------
 
-    void addOrUpdateConnection (int sourceIndex, const juce::String& destParamId, float amount)
+    // Update amount for an existing connection or create a new one with the given default bipolar mode
+    void addOrUpdateConnection (int sourceIndex, const juce::String& destParamId, float amount,
+                                bool defaultBipolarIfNew = false)
     {
         std::lock_guard<std::mutex> lock (connMutex);
         for (auto& c : connections)
@@ -82,7 +112,35 @@ public:
                 return;
             }
         }
-        connections.push_back ({ sourceIndex, destParamId, amount });
+        Connection c;
+        c.sourceIndex = sourceIndex;
+        c.destParamId = destParamId;
+        c.amount = amount;
+        c.bipolar = defaultBipolarIfNew;
+        connections.push_back (c);
+    }
+
+    // Toggle (or create then toggle) the bipolar interpretation of a single connection
+    void toggleConnectionBipolar (int sourceIndex, const juce::String& destParamId)
+    {
+        std::lock_guard<std::mutex> lock (connMutex);
+        for (auto& c : connections)
+        {
+            if (c.sourceIndex == sourceIndex && c.destParamId == destParamId)
+            {
+                c.bipolar = ! c.bipolar;
+                return;
+            }
+        }
+    }
+
+    bool isConnectionBipolar (int sourceIndex, const juce::String& destParamId) const
+    {
+        std::lock_guard<std::mutex> lock (connMutex);
+        for (const auto& c : connections)
+            if (c.sourceIndex == sourceIndex && c.destParamId == destParamId)
+                return c.bipolar;
+        return false;
     }
 
     void removeConnection (int sourceIndex, const juce::String& destParamId)
@@ -114,6 +172,35 @@ public:
         return false;
     }
 
+    void setConnectionBypassed (int sourceIndex, const juce::String& destParamId, bool bypassed)
+    {
+        std::lock_guard<std::mutex> lock (connMutex);
+        for (auto& c : connections)
+            if (c.sourceIndex == sourceIndex && c.destParamId == destParamId)
+            {
+                c.bypassed = bypassed;
+                return;
+            }
+    }
+
+    bool isConnectionBypassed (int sourceIndex, const juce::String& destParamId) const
+    {
+        std::lock_guard<std::mutex> lock (connMutex);
+        for (const auto& c : connections)
+            if (c.sourceIndex == sourceIndex && c.destParamId == destParamId)
+                return c.bypassed;
+        return false;
+    }
+
+    void removeAllConnectionsForParam (const juce::String& destParamId)
+    {
+        std::lock_guard<std::mutex> lock (connMutex);
+        connections.erase (
+            std::remove_if (connections.begin(), connections.end(),
+                [&] (const Connection& c) { return c.destParamId == destParamId; }),
+            connections.end());
+    }
+
     // Returns all connections that target paramId (for drawing aggregated rings)
     std::vector<Connection> getConnectionsForParam (const juce::String& paramId) const
     {
@@ -138,8 +225,9 @@ public:
     }
 
     // Public for direct access from audio thread setters
-    LFO lfo;
+    std::array<LFO, kNumLFOs> lfos;
     StepSequencer stepSeq;
+    EnvelopeFollower envFollower;
 
 private:
     mutable std::mutex connMutex;

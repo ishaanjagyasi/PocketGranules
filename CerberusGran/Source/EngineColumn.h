@@ -14,7 +14,8 @@ public:
                   ModulationEngine* modEngineIn = nullptr)
         : index (headIndex), accentColour (accent),
           fxPanel (apvts, headIndex, accent),
-          modEngine (modEngineIn)
+          modEngine (modEngineIn),
+          apvtsRef (apvts)
     {
         auto id = [headIndex] (const juce::String& name)
         { return "head" + juce::String (headIndex) + "_" + name; };
@@ -135,14 +136,35 @@ public:
 
         addAndMakeVisible (fxPanel);
 
+        // When user changes an FX slot's type during assign mode, the newly visible
+        // knobs need their click-through state re-applied + a repaint to update rings
+        fxPanel.onModTargetsChanged = [this]
+        {
+            if (assignMode) fxPanel.setKnobsClickThrough (true);
+            repaint();
+        };
+
+        // Dim only the panel areas (not the top row of labels/buttons) when disabled
         enableAttachmentCb = std::make_unique<juce::ParameterAttachment> (
             *apvts.getParameter (id ("enable")),
-            [this] (float v) { setAlpha (v >= 0.5f ? 1.0f : 0.35f); repaint(); },
+            [this] (float v) { grainEnabled = v >= 0.5f; repaint(); },
             nullptr);
         enableAttachmentCb->sendInitialUpdate();
 
         updateRateModeVisibility();
         updateSizeLinkVisibility();
+    }
+
+    // Set which modulation source the EngineColumn is currently "focused on" — only
+    // connections from this source will draw their rings on the grain knobs.
+    // When in assign mode, this also updates which source the next drag will write to,
+    // so switching LFO tabs mid-assign retargets new assignments to the new source.
+    void setCurrentViewSource (int sourceIndex)
+    {
+        if (sourceIndex == currentViewSource) return;
+        currentViewSource = sourceIndex;
+        if (assignMode) assignSource = sourceIndex;
+        repaint();
     }
 
     // Enable/disable assignment mode — disables knob interaction so EngineColumn gets the clicks
@@ -161,41 +183,75 @@ public:
         toggle (pitchKnob); toggle (&shapeKnob);
         toggle (gainKnob);  toggle (reverseKnob);
 
+        // Same treatment for FX knobs (currently visible ones)
+        fxPanel.setKnobsClickThrough (active);
+
         repaint();
     }
 
     void mouseDown (const juce::MouseEvent& e) override
     {
         if (! assignMode || modEngine == nullptr) return;
-        draggingCard = findCardAt (e.getPosition());
-        if (draggingCard >= 0)
+
+        auto slots = buildAllModSlots();
+        int slotIdx = findSlotAt (e.getPosition(), slots);
+        if (slotIdx < 0) return;
+        const auto& paramId = slots[slotIdx].paramId;
+
+        // Right-click in assign mode → context menu for managing modulators on this knob
+        if (e.mods.isRightButtonDown() || e.mods.isPopupMenu())
         {
-            float current = modEngine->getConnectionAmount (assignSource, cardParamIds[draggingCard]);
-            dragStartAmount = current;
-            dragStartY = e.y;
+            showModContextMenuForParam (paramId, e.getScreenPosition());
+            return;
         }
+
+        // Option/Alt-click in assign mode → toggle bipolar/unipolar on this connection.
+        // Step Sequencer and Envelope Follower are always unipolar, so option-click is a no-op.
+        if (e.mods.isAltDown())
+        {
+            if (assignSource == ModulationEngine::kStepSeq
+             || assignSource == ModulationEngine::kEnvFollower) return;
+
+            if (! modEngine->hasConnection (assignSource, paramId))
+                modEngine->addOrUpdateConnection (assignSource, paramId, 0.0f, true);
+            else
+                modEngine->toggleConnectionBipolar (assignSource, paramId);
+            repaint();
+            return;
+        }
+
+        draggingParamId  = paramId;
+        dragStartAmount  = modEngine->getConnectionAmount (assignSource, paramId);
+        dragStartY       = e.y;
+    }
+
+    void mouseDoubleClick (const juce::MouseEvent& e) override
+    {
+        if (! assignMode || modEngine == nullptr) return;
+        auto slots = buildAllModSlots();
+        int slotIdx = findSlotAt (e.getPosition(), slots);
+        if (slotIdx < 0) return;
+        modEngine->removeConnection (assignSource, slots[slotIdx].paramId);
+        repaint();
     }
 
     void mouseDrag (const juce::MouseEvent& e) override
     {
-        if (! assignMode || modEngine == nullptr || draggingCard < 0) return;
-
-        // Drag up = positive amount, drag down = negative. 100 px = full range.
+        if (! assignMode || modEngine == nullptr || draggingParamId.isEmpty()) return;
         float delta = (dragStartY - e.y) / 100.0f;
         float newAmount = juce::jlimit (-1.0f, 1.0f, dragStartAmount + delta);
-        modEngine->addOrUpdateConnection (assignSource, cardParamIds[draggingCard], newAmount);
+        modEngine->addOrUpdateConnection (assignSource, draggingParamId, newAmount);
         repaint();
     }
 
     void mouseUp (const juce::MouseEvent&) override
     {
-        if (assignMode && draggingCard >= 0)
+        if (assignMode && ! draggingParamId.isEmpty())
         {
-            // If amount snapped to ~zero, remove connection
-            float a = modEngine->getConnectionAmount (assignSource, cardParamIds[draggingCard]);
+            float a = modEngine->getConnectionAmount (assignSource, draggingParamId);
             if (std::abs (a) < 0.01f)
-                modEngine->removeConnection (assignSource, cardParamIds[draggingCard]);
-            draggingCard = -1;
+                modEngine->removeConnection (assignSource, draggingParamId);
+            draggingParamId.clear();
             repaint();
         }
     }
@@ -223,47 +279,117 @@ public:
     {
         if (modEngine == nullptr) return;
 
-        // Draw modulation rings around each knob whenever a connection exists,
-        // plus an outline on all knobs when in assign mode.
-        for (size_t i = 0; i < knobCardBounds.size() && i < cardParamIds.size(); ++i)
-        {
-            auto card = knobCardBounds[i].toFloat();
-            // Ring circle roughly matches the knob's rendered circle — upper portion of card
-            auto conns = modEngine->getConnectionsForParam (cardParamIds[i]);
+        auto slots = buildAllModSlots();
 
-            // Ring geometry — upper portion of card
-            float radius = juce::jmin (card.getWidth(), card.getHeight() - 30.0f) * 0.5f;
-            float cx = card.getCentreX();
-            float cy = card.getY() + radius + 4.0f;
+        for (const auto& slot : slots)
+        {
+            juce::Slider* slider = slot.slider;
+            if (slider == nullptr) continue;
+
+            // Translate slider's local bounds into EngineColumn coords;
+            // mirror the .reduced(4) inside drawRotarySlider for pixel alignment
+            auto sliderInCol = getLocalArea (slider, slider->getLocalBounds()).toFloat();
+            auto knobBounds  = sliderInCol.reduced (4.0f);
+            float radius = juce::jmin (knobBounds.getWidth(), knobBounds.getHeight()) * 0.5f;
+            float cx = knobBounds.getCentreX();
+            float cy = knobBounds.getCentreY();
+
+            // Knob's angular range and current position
+            auto rp = slider->getRotaryParameters();
+            float startA = rp.startAngleRadians;
+            float endA   = rp.endAngleRadians;
+            float angularRange = endA - startA;
+            float normPos = static_cast<float> (slider->valueToProportionOfLength (slider->getValue()));
+            float currentA = startA + normPos * angularRange;
+
+            auto conns = modEngine->getConnectionsForParam (slot.paramId);
 
             if (assignMode)
             {
-                // Dashed light outline on all knobs to cue "assignable"
-                juce::Colour col (0xff8B5CF6);
-                g.setColour (col.withAlpha (0.35f));
-                g.drawEllipse (cx - radius - 2.0f, cy - radius - 2.0f,
-                               (radius + 2.0f) * 2.0f, (radius + 2.0f) * 2.0f, 1.0f);
+                float r = radius + 2.0f;
+                juce::Colour outlineCol;
+                if      (currentViewSource == ModulationEngine::kStepSeq)     outlineCol = juce::Colour (0xff7DD3FC); // sky blue
+                else if (currentViewSource == ModulationEngine::kEnvFollower) outlineCol = juce::Colour (0xffF5C84A); // yellow
+                else                                                          outlineCol = juce::Colours::white;
+                g.setColour (outlineCol.withAlpha (0.25f));
+                g.drawEllipse (cx - r, cy - r, r * 2.0f, r * 2.0f, 0.8f);
             }
 
-            // Existing connection rings — draw an arc proportional to amount per source
-            float ringRadius = radius + 3.0f;
+            // Modulation arcs — only show connections from the currently-viewed source
+            float ringRadius = radius + 4.0f;
             for (const auto& c : conns)
             {
-                juce::Colour srcCol = (c.sourceIndex == ModulationEngine::kLFO)
-                    ? juce::Colour (0xff8B5CF6) // purple for LFO
-                    : juce::Colour (0xff2DD4BF); // teal for Seq
-                float amt = juce::jlimit (-1.0f, 1.0f, c.amount);
-                float startAngle = juce::MathConstants<float>::pi * 1.5f; // 12 o'clock
-                float sweep = amt * juce::MathConstants<float>::twoPi * 0.9f;
+                if (c.sourceIndex != currentViewSource) continue;
 
-                juce::Path arc;
-                arc.addCentredArc (cx, cy, ringRadius, ringRadius, 0.0f,
-                                   startAngle, startAngle + sweep, true);
-                g.setColour (srcCol.withAlpha (assignMode ? 0.9f : 0.6f));
-                g.strokePath (arc, juce::PathStrokeType (assignMode ? 3.0f : 2.0f));
-                ringRadius += 3.5f; // stack multiple connections
+                float amt = juce::jlimit (-1.0f, 1.0f, c.amount);
+                bool bipolar = c.bipolar; // per-connection — toggle via Option-click in assign mode
+
+                float arcA, arcB;
+                if (bipolar)
+                {
+                    // Bipolar source [-1..1]: arc spans both sides of current position
+                    float halfSwing = std::abs (amt) * angularRange;
+                    arcA = currentA - halfSwing;
+                    arcB = currentA + halfSwing;
+                }
+                else
+                {
+                    // Unipolar source [0..1]: arc only extends in the direction of amount sign
+                    float swing = amt * angularRange;
+                    arcA = currentA;
+                    arcB = currentA + swing;
+                }
+
+                // Clip to the knob's start/end so the arc never crosses past the dial limits
+                arcA = juce::jlimit (startA, endA, arcA);
+                arcB = juce::jlimit (startA, endA, arcB);
+                if (arcA > arcB) std::swap (arcA, arcB);
+
+                if (std::abs (arcB - arcA) > 0.001f)
+                {
+                    juce::Path arc;
+                    arc.addCentredArc (cx, cy, ringRadius, ringRadius, 0.0f,
+                                       arcA, arcB, true);
+                    // White for LFO, sky blue for Step Sequencer, yellow for Envelope Follower
+                    juce::Colour ringCol;
+                    if      (c.sourceIndex == ModulationEngine::kStepSeq)     ringCol = juce::Colour (0xff7DD3FC);
+                    else if (c.sourceIndex == ModulationEngine::kEnvFollower) ringCol = juce::Colour (0xffF5C84A);
+                    else                                                      ringCol = juce::Colours::white;
+                    float alpha = c.bypassed ? 0.20f : 0.85f;
+                    g.setColour (ringCol.withAlpha (alpha));
+                    g.strokePath (arc, juce::PathStrokeType (1.4f));
+                }
+                ringRadius += 3.0f;
             }
         }
+
+        // Disabled-state dim: cover only the panel areas, leaving the top label/button row visible
+        if (! grainEnabled)
+        {
+            g.setColour (juce::Colours::black.withAlpha (0.55f));
+            g.fillRoundedRectangle (grainPanelBounds.toFloat(), 16.0f);
+            g.fillRoundedRectangle (fxPanelBounds.toFloat(),    16.0f);
+        }
+    }
+
+    // Returns the actual juce::Slider child for a given card slot 0..7,
+    // accounting for the rate/syncDiv and len/sizeRatio swap.
+    juce::Slider* getCardSliderForSlot (int slot)
+    {
+        bool isSync   = syncBtn.getToggleState();
+        bool isLinked = sizeLinkBtn.getToggleState();
+        switch (slot)
+        {
+            case 0: return &posKnob->getSlider();
+            case 1: return &spreadKnob->getSlider();
+            case 2: return isSync   ? &syncDivKnob->getSlider()   : &rateKnob->getSlider();
+            case 3: return isLinked ? &sizeRatioKnob->getSlider() : &lenKnob->getSlider();
+            case 4: return &pitchKnob->getSlider();
+            case 5: return &shapeKnob.getSlider();
+            case 6: return &gainKnob->getSlider();
+            case 7: return &reverseKnob->getSlider();
+        }
+        return nullptr;
     }
 
     void resized() override
@@ -366,11 +492,33 @@ private:
     std::array<juce::String, 8> cardParamIds;
 
     ModulationEngine* modEngine = nullptr;
+    juce::AudioProcessorValueTreeState& apvtsRef;
+    bool grainEnabled = true;
     bool assignMode = false;
     int  assignSource = 0;
-    int  draggingCard = -1;
+    int  currentViewSource = ModulationEngine::kLFO0; // default to LFO 1
+    juce::String draggingParamId;
     float dragStartAmount = 0.0f;
     int  dragStartY = 0;
+
+    // Read bipolar state directly from APVTS so the UI stays in sync without
+    // depending on audio-thread timing.
+    bool isSourceBipolarFromApvts (int sourceIndex) const
+    {
+        if (sourceIndex == ModulationEngine::kStepSeq)
+        {
+            if (auto* p = apvtsRef.getRawParameterValue ("seq_bipolar"))
+                return p->load() >= 0.5f;
+            return false;
+        }
+        if (ModulationEngine::isLFOSource (sourceIndex))
+        {
+            auto pid = "lfo" + juce::String (sourceIndex) + "_bipolar";
+            if (auto* p = apvtsRef.getRawParameterValue (pid))
+                return p->load() >= 0.5f;
+        }
+        return true;
+    }
 
     int findCardAt (juce::Point<int> p) const
     {
@@ -378,6 +526,102 @@ private:
             if (knobCardBounds[i].contains (p))
                 return static_cast<int> (i);
         return -1;
+    }
+
+    // Unified mod-slot list — all currently-modulatable knobs (8 grain + visible FX)
+    struct ModSlot { juce::Slider* slider; juce::String paramId; };
+
+    std::vector<ModSlot> buildAllModSlots()
+    {
+        std::vector<ModSlot> slots;
+        for (int i = 0; i < (int) cardParamIds.size(); ++i)
+            if (auto* s = getCardSliderForSlot (i))
+                slots.push_back ({ s, cardParamIds[i] });
+
+        for (auto& t : fxPanel.getAllVisibleModTargets())
+            slots.push_back ({ t.slider, t.paramId });
+
+        return slots;
+    }
+
+    int findSlotAt (juce::Point<int> p, const std::vector<ModSlot>& slots) const
+    {
+        for (size_t i = 0; i < slots.size(); ++i)
+        {
+            auto bounds = getLocalArea (slots[i].slider, slots[i].slider->getLocalBounds());
+            if (bounds.contains (p)) return static_cast<int> (i);
+        }
+        return -1;
+    }
+
+    juce::String sourceDisplayName (int srcIdx) const
+    {
+        if (srcIdx == ModulationEngine::kStepSeq) return "Step Seq";
+        if (ModulationEngine::isLFOSource (srcIdx))
+            return "LFO " + juce::String (srcIdx + 1);
+        return "Source " + juce::String (srcIdx);
+    }
+
+    void showModContextMenuForParam (const juce::String& paramId, juce::Point<int> screenPos)
+    {
+        if (modEngine == nullptr) return;
+        auto conns = modEngine->getConnectionsForParam (paramId);
+
+        juce::PopupMenu menu;
+
+        if (conns.empty())
+        {
+            menu.addSectionHeader ("No modulators on this control");
+        }
+        else
+        {
+            menu.addSectionHeader ("Modulators");
+            for (const auto& c : conns)
+            {
+                const juce::String name = sourceDisplayName (c.sourceIndex);
+                menu.addItem (1000 + c.sourceIndex,
+                              "Bypass " + name,
+                              true,
+                              c.bypassed);
+            }
+            for (const auto& c : conns)
+            {
+                const juce::String name = sourceDisplayName (c.sourceIndex);
+                menu.addItem (2000 + c.sourceIndex, "Remove " + name);
+            }
+            menu.addSeparator();
+            menu.addItem (9999, "Remove All Modulators");
+        }
+
+        // Apply CerberusLookAndFeel directly (Avenir Bold, dark theme — same as FX dropdowns)
+        menu.setLookAndFeel (&getLookAndFeel());
+
+        // Anchor the menu at the actual mouse cursor location
+        auto opts = juce::PopupMenu::Options()
+                        .withTargetScreenArea (juce::Rectangle<int> (screenPos.x, screenPos.y, 1, 1))
+                        .withMinimumWidth (180);
+
+        menu.showMenuAsync (opts,
+            [this, paramId] (int result)
+            {
+                if (result == 0 || modEngine == nullptr) return;
+                if (result == 9999)
+                {
+                    modEngine->removeAllConnectionsForParam (paramId);
+                }
+                else if (result >= 1000 && result < 2000)
+                {
+                    int src = result - 1000;
+                    bool current = modEngine->isConnectionBypassed (src, paramId);
+                    modEngine->setConnectionBypassed (src, paramId, ! current);
+                }
+                else if (result >= 2000 && result < 3000)
+                {
+                    int src = result - 2000;
+                    modEngine->removeConnection (src, paramId);
+                }
+                repaint();
+            });
     }
 
     juce::ToggleButton enableBtn;

@@ -87,6 +87,16 @@ void CerberusGranAudioProcessorEditor::timerCallback()
         waveformDisplay.updateLiveWaveform();
 
     waveformDisplay.repaint();
+
+    // Push the currently-selected mod source from the Advanced panel down to all
+    // EngineColumns so the rings only show that source's connections, then
+    // repaint the visible column so live state (bipolar, knob position) updates.
+    int viewSource = advancedPanel.resolveSourceIndex();
+    for (auto* col : columns)
+        col->setCurrentViewSource (viewSource);
+
+    if (auto* col = columns[currentHeadIndex])
+        col->repaint();
 }
 
 void CerberusGranAudioProcessorEditor::switchToHead (int headIndex)

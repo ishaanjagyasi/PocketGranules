@@ -7,13 +7,43 @@ class FXChainPanel : public juce::Component
 public:
     FXChainPanel (juce::AudioProcessorValueTreeState& apvts, int headIndex, juce::Colour accent)
     {
+        // Don't catch clicks on the panel itself; let children/parent handle them.
+        // This lets EngineColumn intercept clicks on FX knobs in assign mode.
+        setInterceptsMouseClicks (false, true);
+
         for (int i = 0; i < 4; ++i)
         {
             auto* card = new FXSlotCard (apvts, headIndex, accent);
-            card->onSelectionChanged = [this] { updateAvailableEffects(); };
+            card->setInterceptsMouseClicks (false, true);
+            card->onSelectionChanged = [this] {
+                updateAvailableEffects();
+                if (onModTargetsChanged) onModTargetsChanged();
+            };
             cards.add (card);
             addAndMakeVisible (card);
         }
+    }
+
+    // Notification fired when any FX slot's selected type changes (so visible mod targets shift)
+    std::function<void()> onModTargetsChanged;
+
+    // Aggregate all currently-visible mod targets across all 4 slots
+    std::vector<FXSlotCard::ModTarget> getAllVisibleModTargets() const
+    {
+        std::vector<FXSlotCard::ModTarget> result;
+        for (auto* card : cards)
+        {
+            auto t = card->getVisibleModTargets();
+            result.insert (result.end(), t.begin(), t.end());
+        }
+        return result;
+    }
+
+    // Apply assign-mode click pass-through to all FX slot knobs
+    void setKnobsClickThrough (bool clickThrough)
+    {
+        for (auto* card : cards)
+            card->setKnobsClickThrough (clickThrough);
     }
 
     void resized() override

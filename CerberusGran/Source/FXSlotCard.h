@@ -68,6 +68,66 @@ public:
     FXType getSelectedType() const { return selectedType; }
     int getIdealHeight() const { return kFixedHeight; }
 
+    // Each visible modulatable knob, used by the modulation system to draw rings
+    // and to capture clicks in assign mode.
+    struct ModTarget
+    {
+        juce::Slider* slider;
+        juce::String paramId;
+    };
+
+    // Enable/disable click capture on the modulatable knobs so EngineColumn
+    // can intercept drags during assign mode. The slider's parent RotaryKnob also
+    // needs intercept disabled, otherwise it catches the click before the slider's
+    // pass-through can propagate up through FXSlotCard / FXChainPanel.
+    void setKnobsClickThrough (bool clickThrough)
+    {
+        for (auto& t : getVisibleModTargets())
+        {
+            t.slider->setInterceptsMouseClicks (! clickThrough, ! clickThrough);
+            if (auto* parent = t.slider->getParentComponent())
+                parent->setInterceptsMouseClicks (! clickThrough, ! clickThrough);
+        }
+    }
+
+    std::vector<ModTarget> getVisibleModTargets() const
+    {
+        std::vector<ModTarget> result;
+        if (selectedType == FXType::None) return result;
+
+        auto pid = [this] (const juce::String& name)
+        { return "head" + juce::String (head) + "_" + name; };
+
+        switch (selectedType)
+        {
+            case FXType::Filter:
+                if (filterKnobs[0]) result.push_back ({ &filterKnobs[0]->getSlider(), pid ("filterCutoff") });
+                if (filterKnobs[1]) result.push_back ({ &filterKnobs[1]->getSlider(), pid ("filterRes") });
+                break;
+            case FXType::Bitcrush:
+                if (crushKnobs[0]) result.push_back ({ &crushKnobs[0]->getSlider(), pid ("crushBits") });
+                if (crushKnobs[1]) result.push_back ({ &crushKnobs[1]->getSlider(), pid ("crushRate") });
+                break;
+            case FXType::Delay:
+            {
+                bool delaySync = (delayTimeModeBox.getSelectedId() == 2);
+                // Time knob is only visible (and modulatable) in Time mode
+                if (! delaySync && delayKnobs[0])
+                    result.push_back ({ &delayKnobs[0]->getSlider(), pid ("delayTime") });
+                if (delayKnobs[1]) result.push_back ({ &delayKnobs[1]->getSlider(), pid ("delayFeedback") });
+                if (delayKnobs[2]) result.push_back ({ &delayKnobs[2]->getSlider(), pid ("delayMix") });
+                break;
+            }
+            case FXType::Reverb:
+                if (reverbKnobs[0]) result.push_back ({ &reverbKnobs[0]->getSlider(), pid ("reverbSize") });
+                if (reverbKnobs[1]) result.push_back ({ &reverbKnobs[1]->getSlider(), pid ("reverbDamp") });
+                if (reverbKnobs[2]) result.push_back ({ &reverbKnobs[2]->getSlider(), pid ("reverbMix") });
+                break;
+            default: break;
+        }
+        return result;
+    }
+
     std::function<void()> onSelectionChanged;
 
     void setDisabledEffects (const std::set<FXType>& usedByOthers)

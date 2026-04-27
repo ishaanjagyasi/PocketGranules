@@ -43,10 +43,12 @@ target_sources(PocketGranules PRIVATE
     Source/GlobalBar.h
     Source/Modulation/LFO.h
     Source/Modulation/StepSequencer.h
+    Source/Modulation/EnvelopeFollower.h
     Source/Modulation/ModulationEngine.h
     Source/UI/AdvancedPanel.h
     Source/UI/LFOPanel.h
     Source/UI/StepSequencerPanel.h
+    Source/UI/EnvelopeFollowerPanel.h
 )
 
 target_compile_definitions(PocketGranules_VST3 PRIVATE JUCE_VST3_CAN_REPLACE_VST2=0)
